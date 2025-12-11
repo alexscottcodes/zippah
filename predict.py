@@ -27,12 +27,12 @@ class Predictor(BasePredictor):
             le=9,
         ),
         compression_method: str = Input(
-            description="Compression method",
+            description="Compression method (LZMA2 for 7z, Deflate for zip recommended)",
             default="LZMA2",
             choices=["LZMA", "LZMA2", "PPMd", "BZip2", "Deflate", "Copy"],
         ),
         archive_format: str = Input(
-            description="Archive format",
+            description="Archive format (7z recommended for best compression)",
             default="7z",
             choices=["7z", "zip", "tar"],
         ),
@@ -64,13 +64,23 @@ class Predictor(BasePredictor):
             file_list = []
             total_size = 0
             
+            # Validate format and method compatibility
+            if archive_format == "zip" and compression_method == "LZMA2":
+                print("⚠️  Warning: ZIP doesn't support LZMA2, using LZMA instead")
+                compression_method = "LZMA"
+            
             for idx, input_file in enumerate(input_files, 1):
                 src_path = Path(str(input_file))
+                
+                # Verify file exists
+                if not src_path.exists():
+                    raise RuntimeError(f"Input file does not exist: {src_path}")
+                
                 file_size = src_path.stat().st_size
                 total_size += file_size
                 
                 print(f"  [{idx}] {src_path.name} ({self._format_size(file_size)})")
-                file_list.append(str(input_file))
+                file_list.append(str(src_path.absolute()))
             
             print(f"\n📊 Total input size: {self._format_size(total_size)}")
             
@@ -83,6 +93,9 @@ class Predictor(BasePredictor):
             
             # Build 7z command
             cmd = ["7z", "a"]  # 'a' = add to archive
+            
+            # Archive format
+            cmd.extend([f"-t{archive_format}"])
             
             # Compression level
             cmd.extend([f"-mx={compression_level}"])
@@ -140,36 +153,90 @@ class Predictor(BasePredictor):
             cmd.extend(file_list)
             
             print(f"\n🚀 Starting compression...")
-            print(f"Command: {' '.join(cmd[:5])}... [files omitted]")
+            print(f"📦 Output format: {archive_format.upper()}")
+            if len(cmd) < 20:  # Only show full command if reasonable length
+                print(f"Command: {' '.join(cmd)}")
+            else:
+                print(f"Command: {' '.join(cmd[:10])}... [+{len(file_list)} files]")
             print("-" * 60)
             
             # Run compression with real-time output
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,
             )
             
             # Stream output
-            for line in process.stdout:
-                line = line.rstrip()
-                if line:
-                    # Parse progress if available
-                    if "%" in line:
-                        print(f"⏳ {line}")
-                    elif any(x in line for x in ["Everything", "OK", "Compressing", "Adding"]):
-                        print(f"✓ {line}")
-                    else:
-                        print(f"  {line}")
+            stdout_lines = []
+            stderr_lines = []
             
+            # Read stdout
+            if process.stdout:
+                for line in process.stdout:
+                    line = line.rstrip()
+                    stdout_lines.append(line)
+                    if line:
+                        # Parse progress if available
+                        if "%" in line:
+                            print(f"⏳ {line}")
+                        elif any(x in line for x in ["Everything", "OK", "Compressing", "Adding", "files,"]):
+                            print(f"✓ {line}")
+                        elif "ERROR" in line or "Error" in line:
+                            print(f"❌ {line}")
+                        else:
+                            print(f"  {line}")
+            
+            # Wait for process to complete
+            stderr_output = process.stderr.read() if process.stderr else ""
             process.wait()
             
+            # Check for errors
             if process.returncode != 0:
-                raise RuntimeError(f"Compression failed with exit code {process.returncode}")
+                print("\n" + "="*60)
+                print("❌ COMPRESSION FAILED")
+                print("="*60)
+                print(f"\nExit code: {process.returncode}")
+                
+                if stderr_output:
+                    print(f"\nError output:")
+                    print(stderr_output)
+                
+                print("\n7z command that was attempted:")
+                print(" ".join(cmd))
+                
+                print("\nFile paths being compressed:")
+                for f in file_list[:5]:  # Show first 5
+                    print(f"  - {f}")
+                if len(file_list) > 5:
+                    print(f"  ... and {len(file_list) - 5} more")
+                
+                raise RuntimeError(
+                    f"Compression failed with exit code {process.returncode}. "
+                    f"Check the output above for details."
+                )
             
             print("-" * 60)
+            
+            # Verify output file was created
+            if not output_path.exists() and not volume_size:
+                # Check if any files were created in temp directory
+                created_files = list(temp_path.glob("*"))
+                if created_files:
+                    print(f"\n⚠️  Expected output not found, but these files were created:")
+                    for f in created_files:
+                        print(f"  - {f.name} ({self._format_size(f.stat().st_size)})")
+                    # Use the first file found
+                    final_output = created_files[0]
+                    print(f"\nUsing {final_output.name} as output")
+                else:
+                    raise RuntimeError(
+                        f"Output file not created: {output_path}\n"
+                        f"No files found in temp directory."
+                    )
+            
             print("✅ Compression completed successfully!")
             
             # Check output file(s)
@@ -177,7 +244,10 @@ class Predictor(BasePredictor):
                 # Find all volume files
                 volume_files = sorted(temp_path.glob(f"compressed.{archive_format}.*"))
                 if not volume_files:
-                    raise RuntimeError("No output volumes found")
+                    raise RuntimeError(
+                        f"No output volumes found in {temp_path}\n"
+                        f"Expected pattern: compressed.{archive_format}.*"
+                    )
                 
                 total_compressed = sum(f.stat().st_size for f in volume_files)
                 print(f"\n📦 Created {len(volume_files)} volume(s)")
@@ -189,6 +259,11 @@ class Predictor(BasePredictor):
                 print(f"\n⚠️  Returning first volume: {final_output.name}")
                 print(f"   Note: Download all volumes manually to extract")
             else:
+                if not output_path.exists():
+                    raise RuntimeError(
+                        f"Output file was not created: {output_path}\n"
+                        f"Compression may have failed silently."
+                    )
                 final_output = output_path
                 compressed_size = final_output.stat().st_size
                 total_compressed = compressed_size
