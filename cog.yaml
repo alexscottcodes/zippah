@@ -1,0 +1,8 @@
+build:
+  gpu: false
+  system_packages:
+    - p7zip-full
+  python_version: "3.11"
+  python_requirements: requirements.txt
+
+predict: "predict.py:Predictor"
