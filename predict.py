@@ -88,17 +88,32 @@ class Predictor(BasePredictor):
             cmd.extend([f"-mx={compression_level}"])
             print(f"\n⚙️  Compression level: {compression_level} ({self._get_level_name(compression_level)})")
             
-            # Compression method
+            # Compression method (only for 7z format)
             if archive_format == "7z":
                 cmd.extend([f"-m0={compression_method}"])
                 print(f"⚙️  Compression method: {compression_method}")
-            
-            # Solid archive
-            if solid_archive and archive_format == "7z":
-                cmd.extend(["-ms=on"])
-                print(f"⚙️  Solid archive: enabled")
+                
+                # Solid archive (only for 7z)
+                if solid_archive:
+                    cmd.extend(["-ms=on"])
+                    print(f"⚙️  Solid archive: enabled")
+                else:
+                    cmd.extend(["-ms=off"])
+            elif archive_format == "zip":
+                # ZIP uses different method syntax
+                zip_methods = {
+                    "LZMA": "-mm=LZMA",
+                    "LZMA2": "-mm=LZMA",  # ZIP doesn't support LZMA2, use LZMA
+                    "PPMd": "-mm=PPMd",
+                    "BZip2": "-mm=BZip2",
+                    "Deflate": "-mm=Deflate",
+                    "Copy": "-mm=Copy"
+                }
+                cmd.extend([zip_methods.get(compression_method, "-mm=Deflate")])
+                print(f"⚙️  Compression method: {compression_method}")
             else:
-                cmd.extend(["-ms=off"])
+                # TAR doesn't have compression methods in 7z
+                print(f"⚙️  Archive format: tar (compression via level only)")
             
             # Password encryption
             if password:
